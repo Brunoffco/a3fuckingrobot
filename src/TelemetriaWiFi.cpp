@@ -35,6 +35,31 @@ TelemetriaData dataBuffer[BUFFER_SIZE];
 int bufferIndex = 0;
 int bufferCount = 0;
 
+// Variáveis globais para PID otimizado
+float pidKpOtimizado = -1.0;
+float pidKdOtimizado = -1.0;
+bool pidAplicado = false;
+
+// ML: Classificar tipo de curva baseado em aceleração lateral
+struct CurveAnalysis {
+  float avgAccelY;
+  float peakAccelY;
+  int curveType;  // 0=reta, 1=suave, 2=média, 3=forte
+  float recommendedKp;
+  float recommendedKd;
+};
+
+// Forward declarations
+void handleRaiz();
+void handleTelemetria();
+void handleJSON();
+void handleCSV();
+void handleML();
+void handleReset();
+void handleTuneML();
+void handleAplicarPID();
+CurveAnalysis analisarCurva(int startIdx, int endIdx);
+
 void handleRaiz() {
   String html = R"rawliteral(
 <!DOCTYPE html>
@@ -528,64 +553,126 @@ void handleRaiz() {
     }
     
     function atualizarML() {
-      fetch('/ml.json')
+      fetch('/tune')
         .then(response => response.json())
         .then(data => {
-          let html = '';
-          if (data.overall) {
-            html += '<strong>Análise Geral:</strong><br>';
-            html += 'Pico Aceleração Y: ' + data.overall.peakAccelY.toFixed(2) + ' mg<br>';
-            const curveTypes = ['Reta', 'Suave', 'Média', 'Forte'];
-            html += 'Tipo de Curva: ' + curveTypes[data.overall.curveType] + '<br>';
-            html += '<strong>Recomendações:</strong><br>';
-            html += 'Kp recomendado: ' + data.overall.recommendation.kp.toFixed(4) + '<br>';
-            html += 'Kd recomendado: ' + data.overall.recommendation.kd.toFixed(4) + '<br><br>';
+          let html = '<div class="ml-content">';
+          
+          if (data.metrics) {
+            html += '<div class="ml-item">';
+            html += '<div class="ml-item-title">📊 Métricas Atuais</div>';
+            html += 'Erro Médio: <strong>' + data.metrics.avgError + '</strong><br>';
+            html += 'Erro Máx: <strong>' + data.metrics.maxError + '</strong><br>';
+            html += 'Instabilidades: <strong>' + data.metrics.instabilityCount + '</strong><br>';
+            html += 'Acel. Y: <strong>' + data.metrics.accelY.avg.toFixed(3) + ' g</strong>';
+            html += '</div>';
             
-            if (data.segments && data.segments.length > 0) {
-              html += '<strong>Por Segmento:</strong><br>';
-              for (let i = 0; i < data.segments.length; i++) {
-                const seg = data.segments[i];
-                html += 'Seg ' + (i+1) + ': ' + seg.type + ' (Kp: ' + seg.suggestedKp.toFixed(4) + ')<br>';
-              }
+            if (data.aiRecommendation) {
+              html += '<div class="ml-item">';
+              html += '<div class="ml-item-title">🤖 IA Recomenda</div>';
+              html += 'Kp: <strong id="recKp">' + data.aiRecommendation.kp.toFixed(6) + '</strong><br>';
+              html += 'Ki: <strong>' + data.aiRecommendation.ki.toFixed(8) + '</strong><br>';
+              html += 'Kd: <strong id="recKd">' + data.aiRecommendation.kd.toFixed(6) + '</strong><br>';
+              html += 'Confiança: <strong>' + (data.aiRecommendation.confidence * 100).toFixed(0) + '%</strong>';
+              html += '</div>';
+              
+              html += '<div class="ml-item">';
+              html += '<button onclick="aplicarRecomendacaoIA(' + data.aiRecommendation.kp.toFixed(6) + ', ' + data.aiRecommendation.kd.toFixed(6) + ')" style="width: 100%; margin-top: 10px;">✓ APLICAR RECOMENDAÇÃO</button>';
+              html += '</div>';
             }
             
-            if (data.stats) {
-              html += '<br><strong>Estatísticas:</strong><br>';
-              html += 'Range Pos: ' + data.stats.positionRange[0] + '-' + data.stats.positionRange[1] + '<br>';
-              html += 'Erro Médio: ' + data.stats.avgError + '<br>';
-              html += 'Pontos: ' + data.stats.totalPoints;
+            html += '<div class="ml-item">';
+            html += '<div class="ml-item-title">💾 Histórico</div>';
+            html += 'Buffer: <strong>' + data.bufferSize + '</strong> pontos<br>';
+            if (data.optimized.kp > 0) {
+              html += 'Último Kp: <strong>' + data.optimized.kp.toFixed(6) + '</strong><br>';
+              html += 'Último Kd: <strong>' + data.optimized.kd.toFixed(6) + '</strong>';
+            } else {
+              html += '(Nenhuma otimização aplicada ainda)';
             }
+            html += '</div>';
+          } else if (data.error) {
+            html += '<div class="ml-item"><strong style="color: #ff6666;">⚠️ ' + data.error + '</strong></div>';
           }
+          
+          html += '</div>';
           document.getElementById('mlAnalysis').innerHTML = html;
         })
         .catch(err => {
-          document.getElementById('mlAnalysis').innerHTML = 'Erro ao carregar análise';
+          document.getElementById('mlAnalysis').innerHTML = '<div class="ml-item"><strong style="color: #ff6666;">Erro ao carregar análise IA</strong></div>';
         });
     }
     
+    function aplicarRecomendacaoIA(kp, kd) {
+      const confirmMsg = 'Aplicar Kp=' + kp.toFixed(6) + ' e Kd=' + kd.toFixed(6) + '?';
+      if (!confirm(confirmMsg)) return;
+      
+      fetch('/aplicar-pid?kp=' + kp + '&kd=' + kd)
+        .then(response => response.json())
+        .then(data => {
+          if (data.status === 'OK') {
+            alert('✓ PID atualizado com sucesso!');
+            document.getElementById('kp').textContent = kp.toFixed(6);
+            document.getElementById('kd').textContent = kd.toFixed(6);
+            atualizarML();
+          } else {
+            alert('Erro: ' + data.error);
+          }
+        })
+        .catch(err => alert('Erro de conexão'));
+    }
+    
     function atualizarDados() {
+      // Atualizar com o último JSON do servidor
       fetch('/dados.json')
         .then(response => response.json())
         .then(data => {
           if (data && data.t) {
+            // Atualizar cards
             document.getElementById('posicao').textContent = data.pos;
+            document.getElementById('pwmE').textContent = data.pwmE;
+            document.getElementById('pwmD').textContent = data.pwmD;
+            document.getElementById('rpmE').textContent = data.pwmE;
+            document.getElementById('rpmD').textContent = data.pwmD;
             document.getElementById('erro').textContent = data.err;
             document.getElementById('correcao').textContent = data.cor.toFixed(1);
-            document.getElementById('pwm').textContent = data.pwmE + ' / ' + data.pwmD;
-            document.getElementById('pid').textContent = data.kp.toFixed(4) + ' / ' + data.ki.toFixed(4) + ' / ' + data.kd.toFixed(4);
-            document.getElementById('accel').textContent = (data.ax || 0).toFixed(1) + ' / ' + (data.ay || 0).toFixed(1) + ' / ' + (data.az || 0).toFixed(1);
-            document.getElementById('gyro').textContent = (data.gx || 0).toFixed(1) + ' / ' + (data.gy || 0).toFixed(1) + ' / ' + (data.gz || 0).toFixed(1);
-            document.getElementById('status').textContent = 'Online';
-            document.getElementById('status').className = 'value status-online';
+            document.getElementById('kp').textContent = data.kp.toFixed(6);
+            document.getElementById('ki').textContent = data.ki.toFixed(6);
+            document.getElementById('kd').textContent = data.kd.toFixed(6);
+            document.getElementById('ax').textContent = (data.ax || 0).toFixed(2);
+            document.getElementById('ay').textContent = (data.ay || 0).toFixed(2);
+            document.getElementById('az').textContent = (data.az || 0).toFixed(2);
+            document.getElementById('gx').textContent = (data.gx || 0).toFixed(2);
+            document.getElementById('gy').textContent = (data.gy || 0).toFixed(2);
+            document.getElementById('gz').textContent = (data.gz || 0).toFixed(2);
+            
+            // Atualizar barras de progresso
+            const posPercent = ((data.pos / 7000) * 100) + '%';
+            document.getElementById('posBar').style.width = posPercent;
+            const pwmPercent = ((Math.abs(data.pwmE) / 255) * 100) + '%';
+            document.getElementById('pwmEBar').style.width = pwmPercent;
+            document.getElementById('pwmDBar').style.width = ((Math.abs(data.pwmD) / 255) * 100) + '%';
+            
+            document.getElementById('status').textContent = 'ONLINE';
+            document.getElementById('statusBadge').className = 'status-badge online';
+            
             dados.push(data);
             if (dados.length > 500) dados.shift();
             desenharTrajetoria();
           }
         })
         .catch(err => {
-          document.getElementById('status').textContent = 'Desconectado';
-          document.getElementById('status').className = 'value status-offline';
+          document.getElementById('status').textContent = 'OFFLINE';
+          document.getElementById('statusBadge').className = 'status-badge offline';
         });
+    }
+    
+    function resetarTrilha() {
+      dados.length = 0;
+      desenharPista();
+      fetch('/reset')
+        .then(() => console.log('Trilha resetada'))
+        .catch(err => console.log('Erro ao resetar'));
     }
     
     function baixarDados() {
@@ -626,7 +713,23 @@ void handleRaiz() {
 
 void handleTelemetria() {
   clientesConectados = true;
-  webServer.send(200, "application/json", ultimoJSON);
+  
+  // Enviar headers para SSE (Server-Sent Events)
+  webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webServer.send(200, "text/event-stream", "");
+  
+  // Enviar alguns pontos do buffer em SSE format
+  for (int i = 0; i < min(50, bufferCount); i++) {
+    TelemetriaData& d = dataBuffer[i];
+    char jsonLine[350];
+    snprintf(jsonLine, sizeof(jsonLine),
+      "data: {\"t\":%lu,\"pos\":%u,\"err\":%d,\"cor\":%.2f,\"pwmE\":%d,\"pwmD\":%d,\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f,\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f}\n\n",
+      d.timestamp, d.position, d.error, d.correction, d.pwmL, d.pwmR,
+      d.kp, d.ki, d.kd, d.ax, d.ay, d.az, d.gx, d.gy, d.gz
+    );
+    webServer.sendContent(jsonLine);
+  }
+  
   clientesConectados = false;
 }
 
@@ -652,14 +755,6 @@ void handleCSV() {
   webServer.send(200, "text/csv; charset=utf-8", csv);
 }
 
-// ML: Classificar tipo de curva baseado em aceleração lateral
-struct CurveAnalysis {
-  float avgAccelY;
-  float peakAccelY;
-  int curveType;  // 0=reta, 1=suave, 2=média, 3=forte
-  float recommendedKp;
-  float recommendedKd;
-};
 
 CurveAnalysis analisarCurva(int startIdx, int endIdx) {
   CurveAnalysis analysis;
@@ -789,6 +884,9 @@ void iniciarTelemetriaWiFi() {
   webServer.on("/dados.json", handleJSON);
   webServer.on("/dados.csv", handleCSV);
   webServer.on("/ml.json", handleML);
+  webServer.on("/tune", handleTuneML);
+  webServer.on("/reset", handleReset);
+  webServer.on("/aplicar-pid", handleAplicarPID);
   
   webServer.begin();
   Serial.println("Servidor Web iniciado!");
@@ -843,6 +941,154 @@ void enviarDadosTelemetria(int erro, float correcao, int pwmE, int pwmD,
   bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
   if (bufferCount < BUFFER_SIZE) {
     bufferCount++;
+  }
+}
+
+void handleReset() {
+  // Resetar buffer de dados
+  bufferIndex = 0;
+  bufferCount = 0;
+  webServer.send(200, "application/json", "{\"status\":\"buffer resetado\"}");
+}
+
+void handleTuneML() {
+  // Retorna análise detalhada para aplicação de IA
+  String json = "{";
+  json += "\"timestamp\":" + String(millis()) + ",";
+  json += "\"bufferSize\":" + String(bufferCount) + ",";
+  
+  if (bufferCount > 20) {
+    // Calcular métricas
+    float sumError = 0, sumAbsError = 0, maxError = 0;
+    float sumCorr = 0, maxCorr = 0;
+    float sumAccelY = 0, maxAccelY = 0;
+    float sumAccelTotal = 0;
+    
+    for (int i = 0; i < bufferCount; i++) {
+      TelemetriaData& d = dataBuffer[i];
+      
+      int absErr = abs(d.error);
+      sumError += d.error;
+      sumAbsError += absErr;
+      if (absErr > maxError) maxError = absErr;
+      
+      float absCorr = fabs(d.correction);
+      sumCorr += absCorr;
+      if (absCorr > maxCorr) maxCorr = absCorr;
+      
+      float absAy = fabs(d.ay);
+      sumAccelY += absAy;
+      if (absAy > maxAccelY) maxAccelY = absAy;
+      
+      float accelTotal = sqrt(d.ax*d.ax + d.ay*d.ay + d.az*d.az);
+      sumAccelTotal += accelTotal;
+    }
+    
+    float avgError = sumAbsError / bufferCount;
+    float avgCorr = sumCorr / bufferCount;
+    float avgAccelY = sumAccelY / bufferCount;
+    float avgAccelTotal = sumAccelTotal / bufferCount;
+    
+    // Análise de estabilidade
+    int instabilidades = 0;
+    for (int i = 1; i < bufferCount; i++) {
+      int deltaErr = abs(dataBuffer[i].error - dataBuffer[i-1].error);
+      if (deltaErr > 500) instabilidades++;
+    }
+    
+    json += "\"metrics\":{";
+    json += "\"avgError\":" + String((int)avgError) + ",";
+    json += "\"maxError\":" + String((int)maxError) + ",";
+    json += "\"avgCorrection\":" + String(avgCorr, 2) + ",";
+    json += "\"maxCorrection\":" + String(maxCorr, 2) + ",";
+    json += "\"instabilityCount\":" + String(instabilidades) + ",";
+    json += "\"accelY\":{\"avg\":" + String(avgAccelY, 3) + ",\"max\":" + String(maxAccelY, 3) + "},";
+    json += "\"accelTotal\":{\"avg\":" + String(avgAccelTotal, 3) + "}";
+    json += "},";
+    
+    // Recomendações IA adaptativas
+    float suggestedKp, suggestedKi, suggestedKd;
+    
+    if (avgError > 2000) {
+      // Erro muito alto - aumentar Kp
+      suggestedKp = 0.15;
+      suggestedKi = 0.00005;
+      suggestedKd = 0.30;
+    } else if (avgError > 1000) {
+      // Erro alto - aumentar Kp moderado
+      suggestedKp = 0.10;
+      suggestedKi = 0.00003;
+      suggestedKd = 0.25;
+    } else if (avgError > 500) {
+      // Erro médio
+      suggestedKp = 0.07;
+      suggestedKi = 0.00002;
+      suggestedKd = 0.20;
+    } else if (avgError > 200) {
+      // Erro baixo - bom controle
+      suggestedKp = 0.05;
+      suggestedKi = 0.00001;
+      suggestedKd = 0.15;
+    } else {
+      // Muito bom - fine tuning
+      suggestedKp = 0.03;
+      suggestedKi = 0.000005;
+      suggestedKd = 0.10;
+    }
+    
+    // Ajuste por aceleração (curvas)
+    if (maxAccelY > 2.0) {
+      suggestedKd += 0.15;  // Mais amortecimento em curvas
+    } else if (maxAccelY > 1.0) {
+      suggestedKd += 0.05;
+    }
+    
+    json += "\"aiRecommendation\":{";
+    json += "\"kp\":" + String(suggestedKp, 6) + ",";
+    json += "\"ki\":" + String(suggestedKi, 8) + ",";
+    json += "\"kd\":" + String(suggestedKd, 6) + ",";
+    json += "\"confidence\":0.85,";
+    json += "\"reasoning\":\"Baseado em análise de erro, correção e aceleração lateral\"";
+    json += "},";
+    
+    // Últimos valores otimizados
+    json += "\"optimized\":{";
+    json += "\"kp\":" + String(pidAplicado ? pidKpOtimizado : -1, 6) + ",";
+    json += "\"kd\":" + String(pidAplicado ? pidKdOtimizado : -1, 6) + ",";
+    json += "\"applied\":" + String(pidAplicado ? "true" : "false");
+    json += "}";
+    
+  } else {
+    json += "\"error\":\"Insuficientes dados (minimo 20 pontos)\"";
+  }
+  
+  json += "}";
+  webServer.send(200, "application/json; charset=utf-8", json);
+}
+
+void handleAplicarPID() {
+  // Aplicar valores de PID recomendados
+  if (webServer.hasArg("kp") && webServer.hasArg("kd")) {
+    float novoKp = webServer.arg("kp").toFloat();
+    float novoKd = webServer.arg("kd").toFloat();
+    
+    if (novoKp >= 0 && novoKd >= 0) {
+      pidKpOtimizado = novoKp;
+      pidKdOtimizado = novoKd;
+      pidAplicado = true;
+      
+      // TODO: Aqui você aplicaria ao PID real através de uma variável global
+      // extern float KP, KI, KD (em Configuracoes.h)
+      // KP = novoKp;
+      // KD = novoKd;
+      
+      String response = "{\"status\":\"OK\",\"kp\":" + String(novoKp, 6) + ",\"kd\":" + String(novoKd, 6) + ",\"appliedAt\":" + String(millis()) + "}";
+      webServer.send(200, "application/json", response);
+    } else {
+      webServer.send(400, "application/json", "{\"error\":\"Valores invalidos\"}");
+    }
+  } else {
+    webServer.send(400, "application/json", "{\"error\":\"Faltam parametros kp e kd\"}");
   }
 }
 

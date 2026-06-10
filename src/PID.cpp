@@ -5,6 +5,7 @@
 #include "Configuracoes.h"
 #include "TelemetriaWiFi.h"
 #include "LSM6DS3.h"
+#include "Odometria.h"
 
 int16_t erroAnterior = 0;
 int32_t integral = 0;
@@ -48,6 +49,13 @@ void seguirLinha() {
 
   controleMotores(1, velocidadeDireita, velocidadeEsquerda);
 
+  // Atualizar odometria
+  atualizarOdometria(velocidadeEsquerda, velocidadeDireita, giroZ);
+  
+  // Obter posição atual
+  float posX, posY;
+  obterPosicao(posX, posY);
+
   if (DEBUG_PID_ATIVADO) {
     Serial.print("Correção: ");
     Serial.print(correcao);
@@ -63,7 +71,9 @@ void seguirLinha() {
     Serial.println(KD, 3);
   }
 
-  // Envia telemetria via WiFi com dados do acelerômetro
+  // Envia telemetria via WiFi com dados do acelerômetro e posição XY
+  #ifdef INCLUDE_WIFI
   enviarDadosTelemetria(erro, correcao, velocidadeEsquerda, velocidadeDireita,
-                        KP, KI, KD, posicaoAtual, acelX, acelY, acelZ, giroX, giroY, giroZ);
+                        KP, KI, KD, posicaoAtual, acelX, acelY, acelZ, giroX, giroY, giroZ, posX, posY);
+  #endif
 }

@@ -3,6 +3,7 @@
 #include "TelemetriaWiFi.h"
 #include "LSM6DS3.h"
 #include "Configuracoes.h"
+#include "Odometria.h"
 
 const char *AP_SSID = "RoboSeguidor";
 const char *AP_SENHA = "";
@@ -763,7 +764,8 @@ void handleReset()
 {
   bufferIndex = 0;
   bufferCount = 0;
-  webServer.send(200, "application/json", "{\"status\":\"buffer resetado\"}");
+  resetarOdometria();
+  webServer.send(200, "application/json", "{\"status\":\"buffer resetado e odometria zerada\"}");
 }
 
 void handleTuneML()

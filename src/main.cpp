@@ -8,6 +8,7 @@
 #include "Menus.h"
 #include "LSM6DS3.h"
 #include "TelemetriaWiFi.h"
+#include "Odometria.h"
 // #include "ServidorWeb.h"
 
 // Não esqueça de upar os arquivos do servidor web
@@ -32,6 +33,7 @@ void setup() {
     iniciarTelemetriaWiFi();
     configurarModuloQRE();
     inicializarLSM6DS3();
+    inicializarOdometria();
     delayAntesDoStart();
   }
 }
